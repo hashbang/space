@@ -1,0 +1,18 @@
+---
+- hosts: all
+  tasks:
+  - name: Create users on systems
+    block:
+    - user:
+        name: "{{ item }}"
+        groups: "sudo"
+      with_items: "{{ users | from_json }}"
+    - authorized_key:
+        user: "{{ item }}"
+        key: "{{ lookup('file', '../keys/ssh/' + item + '.pub') }}"
+        exclusive: True
+        path: "/home/{{ item }}/.ssh/authorized_keys"
+      with_items: "{{ users | from_json }}"
+    vars:
+      users:
+        - lance

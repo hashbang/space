@@ -1,0 +1,99 @@
+---
+- hosts: all
+
+  tasks:
+
+    - name: Install latest Ansible version
+      block:
+      - apt: update_cache=true
+      - apt:
+          update_cache: true
+          name: ansible
+          state: latest
+      - apt:
+          update_cache: true
+          name: git
+          state: latest
+
+    - name: Install trusted author PGP keys
+      block:
+      - copy: src=../keys/pgp/{{ item }}.asc dest=/etc/ansible/keys/authors/
+        with_items:
+          - lance
+      - file: path=/etc/ansible/keys/gnupg state=directory
+      - shell: |
+          GNUPGHOME=/etc/ansible/keys/gnupg \
+          gpg --import /etc/ansible/keys/authors/*.key
+        args:
+          executable: /bin/bash
+
+    - name: Install ansible-pull config
+      copy:
+        dest: /etc/ansible/ansible-pull.env
+        content: |
+          GIT_REPO=git@github.com:hashbang/space.git
+          GIT_BRANCH=development
+          GIT_PATH=/etc/ansible/repos/space
+          PLAYBOOK_FILE=ansible/ansible_pull.yml
+          INVENTORY_FILE=/etc/ansible/repos/space/ansible/hosts.yml
+          GNUPGHOME=/etc/ansible/keys/gnupg/
+
+    - name: Ensure github.com is a known host
+      lineinfile:
+        dest: /root/.ssh/known_hosts
+        create: yes
+        state: present
+        line: "{{ lookup('pipe', 'ssh-keyscan -t rsa github.com') }}"
+        regexp: "^github\\.com"
+
+    - name: Install ansible-pull as systemd timer
+      when: ansible_service_mgr == "systemd"
+      block:
+      - copy:
+          dest: /etc/systemd/systemd/system/ansible-pull.service
+          content: |
+            [Unit]
+            Description=Run ansible-pull
+            After=network.target
+
+            [Service]
+            EnvironmentFile=/etc/ansible/ansible-pull.env
+            EnvironmentFile=/etc/profile
+            ExecStart=/usr/bin/ansible-pull \
+              -U $GIT_REPO \
+              -C $GIT_BRANCH \
+              -d $GIT_PATH \
+              -c local \
+              --limit $HOSTNAME \
+              -i $INVENTORY_FILE \
+              --verify-commit \
+              --key-file $GIT_PRIVATE_KEY_PATH \
+              $PLAYBOOK_FILE
+            Type=oneshot
+
+            [Install]
+            WantedBy=multi-user.target
+      - copy:
+          dest: /etc/systemd/systemd/system/ansible-pull.timer
+          content: |
+            [Unit]
+            Description=Run ansible-pull every 15 mins
+
+            [Timer]
+            OnBootSec=15min
+            OnUnitActiveSec=15m
+
+            [Install]
+            WantedBy=timers.target
+      - systemd:
+          name: ansible-pull.service
+          daemon_reload: true
+          enabled: True
+      - systemd:
+          name: ansible-pull.timer
+          daemon_reload: true
+          state: started
+          enabled: True
+
+- name: Include primary playbook
+  import_playbook: main.yml
