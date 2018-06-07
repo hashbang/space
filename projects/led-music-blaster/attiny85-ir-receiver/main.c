@@ -1,68 +1,89 @@
-// main.c
-// 
-// A simple blinky program for ATtiny85
-// Connect red LED at pin 2 (PB3)
-//
-// electronut.in
 
-#include <avr/io.h>
-#include <avr/interrupt.h>
-//#include <avr/pgmspace.h>
+#include "main.h"
 
-#include <assert.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdio.h>
+// LED outputs
+//int LED[] = {1, 0, 3, 4};
 
-#define F_CPU  8000000UL
+volatile int NextBit;
+volatile unsigned long RecdData;
+//int Brightness;
 
-/***** Configure IO *****/
-#define CONFIG_AS_INPUT(bit)    {bit ## _DDR &= ~(1 << bit);}
-#define CONFIG_AS_OUTPUT(bit)   {bit ## _DDR |= (1 << bit);}
+// Demo routine
+void ReceivedCode(bool Repeat) {
+  // Check for correct remote control. Change this in future to allow
+  // for custom IR blasters that use different addresses.
+  if ((RecdData & 0xFFFF) != 0xFF00) return;
+  
+  // Read key pressed and run it through switch statement to determine action
+  int key = RecdData >> 16 & 0xFF;
+  switch(key)
+  {
+    case 0x45:  // A2 reversed
+    SET_TOGGLE(RED_LED);
+    break;
+  }  
+    
+  SET_TOGGLE(GRN_LED);
+}
 
-// This globally disables pullups and tristates the pin in the argument. Saves power but use carefully. This also makes the macros header less generic
-//#define CONFIG_AS_DISABLED(bit) {MCUCR |= (1 << PUD); bit ## _DDR &= ~(1 << pin); bit ## _PORT |= (1 << pin);}
+// Interrupt service routine - called on every falling edge of PB2
+// This code works but I'm not a huge fan of the magic numbers. I don't yet know what they all mean
+ISR(INT0_vect) {
+  uint8_t Time = TCNT0;
+  uint8_t Overflow = TIFR & (1 << TOV0);
+  
+  // Keep looking for AGC pulse and gap
+  if (NextBit == 32)
+  {
+    if ((Time >= 194) && (Time <= 228) && (Overflow == 0))
+    {
+      RecdData = 0; NextBit = 0;
+    }
+    else if ((Time >= 159) && (Time <= 193) && (Overflow == 0))
+    {
+      ReceivedCode(1);
+    }
+  // Data bit
+  }
+  else
+  {
+    if ((Time > 44) || (Overflow != 0))
+    {
+      NextBit = 32; // Invalid - restart
+    }
+    else
+    {
+      if (Time > 26)
+      {
+        RecdData = RecdData | ((unsigned long) (1 << NextBit));
+      }
+      if (NextBit == 31)
+      {
+        ReceivedCode(0);
+      }
+      NextBit++;
+    }
+  }
 
-#define PULLUP_ON(bit)          {bit ## _PORT |= (1 << bit);}
-#define PULLUP_OFF(bit)         {bit ## _PORT &= ~(1 << bit);}
-
-/***** Manipulate Outputs *****/
-#define SET_HIGH(bit)           {bit ## _PORT |= (1 << bit);}
-#define SET_LOW(bit)            {bit ## _PORT &= ~(1 << bit);}
-#define SET_TOGGLE(bit)         {bit ## _PORT ^= (1 << bit);}
-
-/***** Test Inputs *****/
-#define IS_HIGH(bit)            (bit ## _PIN & (1 << bit))
-#define IS_LOW(bit)             (! (bit ## _PIN & (1 << bit)))
+  TCNT0 = 0;                  // Clear counter
+  TIFR = TIFR | 1<<TOV0;      // Clear overflow
+  GIFR = GIFR | 1<<INTF0;     // Clear INT0 flag
+}
 
 
-#define GRN_LED       PB0
-#define GRN_LED_PORT  PORTB
-#define GRN_LED_DDR   DDRB
-#define GRN_LED_PIN   PINB
 
-#define RED_LED       PB1
-#define RED_LED_PORT  PORTB
-#define RED_LED_DDR   DDRB
-#define RED_LED_PIN   PINB
+ISR(TIMER1_COMPA_vect)
+{
+  //if ( !(TIFR & (1 << TOV1)) )
+  //{
+  SET_HIGH(WHT_LED);
+  //}
+}
 
-#define BLU_LED       PB3
-#define BLU_LED_PORT  PORTB
-#define BLU_LED_DDR   DDRB
-#define BLU_LED_PIN   PINB
-
-#define WHT_LED       PB4
-#define WHT_LED_PORT  PORTB
-#define WHT_LED_DDR   DDRB
-#define WHT_LED_PIN   PINB
-
-#define IR_RCVR       PB2
-#define IR_RCVR_PORT  PORTB
-#define IR_RCVR_DDR   DDRB
-#define IR_RCVR_PIN   PINB
-
-
+ISR(TIMER1_OVF_vect)
+{
+  SET_LOW(WHT_LED);
+}
 
 int main (void)
 {
@@ -83,27 +104,58 @@ int main (void)
   CONFIG_AS_INPUT(IR_RCVR);
   PULLUP_OFF(IR_RCVR);
 
-  // General Interrupt Flag Register bits be cleared by writing one to them
-  GIFR = 0xFF;
+  // Set up Timer/Counter0 (assumes 1MHz clock)
+
+  // Configure counter/timer0 for fast PWM on PB0 and PB1
+  //TCCR0A = 0;               // No compare matches
+  TCCR0A = (3 << COM0A0) | (3 << COM0B0) | ( 3 << WGM00);
+  TCCR0B = (3 << CS00); // clk_io/64 (From prescaler)
+  //TCCR0B = 0<<WGM02 | 3<<CS00; // Optional; already set
+
+  // Configure counter/timer1 for fast PWM on PB4
+  GTCCR = 1<<PWM1B | 3<<COM1B0;
+  //TCCR1 = 3<<COM1A0 | 7<<CS10;
+  TCCR1 = (1 << CTC1) | (1 << PWM1A) | ( 3 << COM1A0) | (7 << CS10);
+  //GTCCR = (1 << PWM1B) | (3 << COM1B0);
+
+  // Interrupts on OC1A match and overflow
+  TIMSK = TIMSK | (1 << OCIE1A) | (1 << TOIE1);
+
+  // Set up INT0 interrupt on PB2
+  //MCUCR = MCUCR | 2<<ISC00;   // Interrupt on falling edge
+  //GIMSK = GIMSK | 1<<INT0;    // Enable INT0
   
+  //NextBit = 32;               // Wait for AGC start pulse
+  
+  // Globally enable interrupts 
+  sei();
+
   while (1)
   {
-    
+    for (int i=-255; i <= 254; i++)
+    {
+      OCR0A = abs(i);
+      OCR0B = 255-abs(i);
+      OCR1A = abs(i);
+      OCR1B = 255-abs(i);
+      _delay_ms(10);
+    }
+
     // flash# 1:
     // set PB3 high
-    PORTB = 0b00001000; 
-    _delay_ms(20);
+    //PORTB = 0b00001000; 
+    //_delay_ms(20);
     // set PB3 low
-    PORTB = 0b00000000;
-    _delay_ms(20);
+    //PORTB = 0b00000000;
+    //_delay_ms(20);
 
     // flash# 2:
     // set PB3 high
-    PORTB = 0b00001000; 
-    _delay_ms(200);
+    //PORTB = 0b00001000; 
+    //_delay_ms(200);
     // set PB3 low
-    PORTB = 0b00000000;
-    _delay_ms(200);
+    //PORTB = 0b00000000;
+    //_/delay_ms(200);
   }
  
   return 1;
