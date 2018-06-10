@@ -1,9 +1,0 @@
-
-*.elf
-*.hex
-*.map
-*.o
-\.*.swp
-
-tags
-patches
